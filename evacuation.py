@@ -41,7 +41,7 @@ def check_escape_result(path, fire_time):
     for time, pos in enumerate(path):
         r, c = pos
 
-        if fire_time[r][c] != -1 and fire_time[r][c] <= time:
+        if fire_time[r][c] <= time:
             return False, time
 
     return True, len(path) - 1

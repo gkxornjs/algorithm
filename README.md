@@ -1,2 +1,144 @@
-# algorism
-fire-escape-simulator
+# 재난 대피 경로 안내 시스템
+
+가천대학교 AI공학관에서 화재 발생 시, 사용자의 현재 위치에서 가장 가까운 비상구까지 최단 탈출 경로를 실시간으로 안내하는 시뮬레이터입니다.
+화재는 매 시간 단위로 확산되며, 경로가 차단되면 자동으로 재탐색합니다.
+
+---
+
+## 팀원 및 역할
+
+| 이름 | 담당 모듈 | 역할 |
+|------|-----------|------|
+| 민재 | `map_builder.py`, `path_finder.py` | 맵 파싱, A* 경로 탐색, 유니온-파인드 |
+| 태권 | `fire_spread.py`, `evacuation.py` | 화재 확산 시뮬레이션, 대피 통계 |
+| 지원 | `main.py` (UI) | Streamlit 시각화 |
+
+---
+
+## 실행 환경
+
+- Python 3.10+
+- 필요 라이브러리: `streamlit`, `matplotlib`, `numpy`
+
+```bash
+pip install streamlit matplotlib numpy
+```
+
+---
+
+## 실행 방법
+
+**통합 테스트 (터미널 출력)**
+```bash
+python3 main.py
+```
+
+**Streamlit UI**
+```bash
+streamlit run main.py
+```
+
+---
+
+## 파일 구조
+
+```
+project/
+├── building_map.txt   # 맵 데이터 (59행 × 44열)
+├── map_builder.py     # 맵 파싱 및 그래프 구성
+├── path_finder.py     # A* 경로 탐색, 유니온-파인드
+├── fire_spread.py     # BFS 화재 확산 시뮬레이션
+├── evacuation.py      # 대피자 관리 및 통계
+└── main.py            # 통합 테스트 / Streamlit UI
+```
+
+---
+
+## 맵 정보
+
+- **파일**: `building_map.txt`
+- **크기**: 59행 × 44열 (이동 가능 노드 988개)
+- **실제 건물**: 가천대학교 AI공학관 기반 수동 제작
+
+| 심볼 | 의미 |
+|------|------|
+| `#` | 벽 (이동 불가) |
+| `.` | 이동 가능 통로 |
+| `R` | 강의실 (이동 가능) |
+| `X` | 계단 / 비상구 (탈출 목표) |
+| `E` | 엘리베이터 (이동 가능, 탈출 목표 아님) |
+| `S` | 사용자 시작 위치 (런타임 설정) |
+| `F` | 화재 발생 위치 (런타임 랜덤 설정) |
+
+**비상구(X) 위치**: `(1,21)`, `(19,4)`, `(19,29)`, `(52,1)`
+
+---
+
+## 동작 흐름
+
+```
+1. 사용자가 맵에서 현재 위치 클릭 → S 설정
+2. 화재 위치 랜덤 발생 (복수 지점 가능) → F 설정
+3. BFS로 화재 확산 시뮬레이션 (t=0, 1, 2 ...)
+4. 유니온-파인드로 S~X 연결 여부 실시간 확인
+5. A*로 최단 탈출 경로 탐색 (도착 시점 기준 화재 차단)
+6. 결과 시각화 출력
+```
+
+---
+
+## 모듈 연동 방법
+
+```python
+from map_builder import build_map
+from fire_spread import simulate_fire
+from path_finder import get_escape_path
+
+grid, graph, exits = build_map("building_map.txt", start=(r, c))
+fire_time = simulate_fire(grid, fire_count=2)   # 화재 지점 수 조정 가능
+path, dist, possible = get_escape_path(grid, graph, fire_time, current_time=t)
+```
+
+---
+
+## 알고리즘 및 자료구조
+
+| 모듈 | 알고리즘 | 자료구조 |
+|------|----------|----------|
+| `map_builder.py` | DFS (연결성 검증), 삽입 정렬 (출구 거리 정렬) | 2D 배열, 인접 리스트, 딕셔너리 |
+| `path_finder.py` | A* (최단 경로), 유니온-파인드 (연결성 확인) | 우선순위 큐(heapq), 배열 |
+| `fire_spread.py` | BFS (화재 확산), 그리디 (확산 우선순위) | 큐(deque), 2D 배열 |
+| `evacuation.py` | 퀵 정렬, 이진 탐색 | 해시맵(dict), 스택 |
+
+### 핵심 알고리즘 설명
+
+**A* 도착 시점 기준 화재 차단**
+
+단순히 현재 시각 기준이 아닌, 해당 셀에 실제로 도착하는 시간(`current_time + 걸음수`)과 화재 도달 시간을 비교합니다.
+이동 중 화재에 따라잡히는 경우를 정확히 차단합니다.
+
+```python
+# 도착 시점 기준 — 이동 중 화재에 따라잡히는 경우 차단
+if fire_time[nr][nc] <= current_time + new_g:
+    continue
+```
+
+**다중 화재 지점 동시 확산**
+
+여러 화재 시작점을 BFS 큐에 동시에 삽입하여 자연스러운 동시 확산을 구현합니다.
+
+```python
+fire_time = simulate_fire(grid, fire_count=2)
+```
+
+---
+
+## 시각화 색상 기준
+
+| 색상 | 의미 |
+|------|------|
+| 초록 | 시작 위치 (S) |
+| 빨강 | 화재 셀 (F) |
+| 주황 | 최단 탈출 경로 (*) |
+| 연파랑 | A* 탐색 노드 |
+| 회색 | 벽 (#) |
