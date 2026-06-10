@@ -196,3 +196,12 @@ def get_exit_fire_times(fire_time, exits):
             print(f"출구 도달 예상 시간: t={time} -> 출구 {exit_pos}")
 
     return result
+
+def get_random_fire_positions(grid, count=1):
+    return generate_fire_positions(grid, count)
+
+
+def simulate_fire(grid, fire_count=1):
+    fire_positions = get_random_fire_positions(grid, fire_count)
+    fire_time, fire_log = simulate_fire_spread(grid, fire_positions)
+    return fire_time
