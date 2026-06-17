@@ -36,6 +36,7 @@ from evacuation import (
     print_evacuation_statistics,
     quick_sort_escape_times,
     binary_search_time,
+    get_evacuation_statistics,
 )
 
 MAP_FILE = os.path.join(os.path.dirname(__file__), "building_map.txt")
@@ -640,12 +641,40 @@ def render_streamlit_ui():
         s3.metric(f"t≤{target_time} 인원", f"{under}명")
         st.caption(f"탈출시간 정렬(퀵정렬): {sorted_times}")
 
-    # ── 자동 재생: 한 프레임 보여준 뒤 한 스텝 진행하고 rerun ──
-    if (phase == "running" and st.session_state["playing"]
-            and st.session_state["char_state"] == "moving"):
-        time.sleep(st.session_state["speed"])
-        advance_simulation(grid_base, st.session_state["fire_time"], exits)
-        st.rerun()
+    st.divider()
+    st.subheader("🚪 출구 혼잡도 분석")
+
+    exit_capacity = st.slider(
+        "출구 처리 용량(시간당 인원)",
+        min_value=1,
+        max_value=5,
+        value=1,
+        step=1,
+        key="exit_capacity"
+    )
+
+    st.caption("출구에 동시에 여러 명이 도착하면, 설정한 처리 용량만큼만 탈출하고 나머지는 대기합니다.")
+
+    # 통계용 대피자 데이터를 다시 생성하여 출구 혼잡도 계산
+    evacuees_for_congestion, _ = simulate_evacuees(
+        grid_base,
+        st.session_state["fire_time"],
+        exits,
+        0,
+        n=10
+    )
+
+    congestion_stats = get_evacuation_statistics(
+        evacuees_for_congestion,
+        target_time=target_time,
+        use_congestion=True,
+        exit_capacity=exit_capacity
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("최대 대기 인원", f"{congestion_stats['max_waiting']}명")
+    c2.metric("평균 대기 시간", f"{congestion_stats['average_waiting_time']:.1f}초")
+    c3.metric("대기 발생 인원", f"{congestion_stats['total_congested_people']}명")
 
 
 def _running_in_streamlit():
