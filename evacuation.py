@@ -3,17 +3,23 @@
 # 재난 대피 경로 안내 시스템 - 대피자 관리 및 통계 모듈
 #
 # 실행 환경: VSCode / Python 3.9+
-# 필요 라이브러리: 없음 (Python 기본 내장 모듈만 사용)
+# 필요 라이브러리: 없음
 #
-# 자료구조: 해시맵(dict), 스택(stack)
-# 알고리즘: 퀵 정렬, 이진 탐색
+# 자료구조:
+# - 해시맵(dict)
+# - 스택(stack)
+# - 큐(deque)
 #
-# Input 데이터: 대피자 정보(evacuee_list), 경로(path), fire_time — 직접 구성 / main.py에서 전달받음
+# 알고리즘:
+# - 퀵 정렬
+# - 이진 탐색
+# - 출구 혼잡도 시뮬레이션(FIFO Queue)
 # ============================================================
+
+from collections import deque
 
 
 def create_evacuee_dict(evacuee_list):
-    # 자료구조: 해시맵(dict) — 대피자 ID를 키로 정보 저장
     evacuees = {}
 
     for evacuee_id, name, start_pos in evacuee_list:
@@ -25,14 +31,14 @@ def create_evacuee_dict(evacuee_list):
             "success": False,
             "failed": False,
             "path": [],
-            "message": "대기 중"
+            "message": "대기 중",
+            "waiting_time": 0,
         }
 
     return evacuees
 
 
 def save_path_with_stack(path):
-    # 자료구조: 스택(stack) — 경로 역순 저장
     stack = []
 
     for pos in path:
@@ -66,10 +72,7 @@ def check_fire_collision(path, fire_time, t):
     current_pos = get_evacuee_position_at_time(path, t)
     r, c = current_pos
 
-    if fire_time[r][c] != -1 and fire_time[r][c] <= t:
-        return True
-
-    return False
+    return fire_time[r][c] != -1 and fire_time[r][c] <= t
 
 
 def check_escape_result(path, fire_time):
@@ -143,7 +146,7 @@ def update_evacuee_result(evacuees, evacuee_id, path, fire_time):
 
 
 def quick_sort_escape_times(arr):
-    # 알고리즘: 퀵 정렬 — 탈출 시간 오름차순 정렬
+    # 알고리즘: 퀵 정렬
     if len(arr) <= 1:
         return arr
 
@@ -157,7 +160,7 @@ def quick_sort_escape_times(arr):
 
 
 def binary_search_time(sorted_times, target_time):
-    # 알고리즘: 이진 탐색 — 목표 시간 이하 탈출 인원 수 탐색
+    # 알고리즘: 이진 탐색
     left = 0
     right = len(sorted_times) - 1
     answer = -1
@@ -173,21 +176,14 @@ def binary_search_time(sorted_times, target_time):
 
     return answer + 1
 
+
 def simulate_exit_congestion(evacuees, exit_capacity=1):
     """
     출구 혼잡도 시뮬레이션
-
-    exit_capacity:
-    - 한 시간 단위에 출구에서 탈출 가능한 인원 수
-    - 기본값 1명
-
-    동작:
-    - 탈출 성공한 대피자들을 escape_time 기준으로 모음
-    - 같은 시간에 출구에 도착한 인원이 많으면 대기 발생
-    - 출구는 한 시간에 exit_capacity명만 처리
+    - 같은 시간에 여러 명이 출구에 도착하면 대기열 생성
+    - 출구는 한 시간 단위에 exit_capacity명만 처리
     """
 
-    # 자료구조: 해시맵(dict) — 시간별 도착 대피자 관리
     arrival_table = {}
 
     for evacuee_id, data in evacuees.items():
@@ -199,9 +195,7 @@ def simulate_exit_congestion(evacuees, exit_capacity=1):
 
             arrival_table[arrival_time].append(evacuee_id)
 
-    # 자료구조: 큐(list) — 출구 대기열
-    waiting_queue = []
-
+    waiting_queue = deque()
     congestion_result = {}
     escaped_count = 0
     max_waiting = 0
@@ -211,38 +205,38 @@ def simulate_exit_congestion(evacuees, exit_capacity=1):
             "congestion_result": {},
             "max_waiting": 0,
             "average_waiting_time": 0,
-            "total_congested_people": 0
+            "total_congested_people": 0,
         }
 
+    total_arrivals = sum(len(v) for v in arrival_table.values())
     current_time = min(arrival_table.keys())
     end_time = max(arrival_table.keys()) + len(evacuees) + 1
 
     while current_time <= end_time:
-        # 현재 시간에 출구에 도착한 사람들을 대기열에 추가
         if current_time in arrival_table:
             for evacuee_id in arrival_table[current_time]:
                 waiting_queue.append((evacuee_id, current_time))
 
         max_waiting = max(max_waiting, len(waiting_queue))
 
-        # 출구 처리: 한 시간에 exit_capacity명만 탈출 가능
         for _ in range(exit_capacity):
             if waiting_queue:
-                evacuee_id, arrival_time = waiting_queue.pop(0)
+                evacuee_id, arrival_time = waiting_queue.popleft()
+
                 final_escape_time = current_time
                 waiting_time = final_escape_time - arrival_time
 
                 congestion_result[evacuee_id] = {
                     "arrival_time": arrival_time,
                     "final_escape_time": final_escape_time,
-                    "waiting_time": waiting_time
+                    "waiting_time": waiting_time,
                 }
 
                 evacuees[evacuee_id]["escape_time"] = final_escape_time
                 evacuees[evacuee_id]["waiting_time"] = waiting_time
                 escaped_count += 1
 
-        if escaped_count == sum(len(v) for v in arrival_table.values()):
+        if escaped_count == total_arrivals:
             break
 
         current_time += 1
@@ -252,22 +246,31 @@ def simulate_exit_congestion(evacuees, exit_capacity=1):
         for data in congestion_result.values()
     ]
 
-    average_waiting_time = 0
-    if waiting_times:
-        average_waiting_time = sum(waiting_times) / len(waiting_times)
+    average_waiting_time = (
+        sum(waiting_times) / len(waiting_times)
+        if waiting_times
+        else 0
+    )
 
     total_congested_people = len([
-        w for w in waiting_times if w > 0
+        wait for wait in waiting_times
+        if wait > 0
     ])
 
     return {
         "congestion_result": congestion_result,
         "max_waiting": max_waiting,
         "average_waiting_time": average_waiting_time,
-        "total_congested_people": total_congested_people
+        "total_congested_people": total_congested_people,
     }
 
-def get_evacuation_statistics(evacuees, target_time=5, use_congestion=False, exit_capacity=1):
+
+def get_evacuation_statistics(
+    evacuees,
+    target_time=5,
+    use_congestion=False,
+    exit_capacity=1
+):
     if use_congestion:
         congestion = simulate_exit_congestion(evacuees, exit_capacity)
     else:
@@ -275,7 +278,7 @@ def get_evacuation_statistics(evacuees, target_time=5, use_congestion=False, exi
             "congestion_result": {},
             "max_waiting": 0,
             "average_waiting_time": 0,
-            "total_congested_people": 0
+            "total_congested_people": 0,
         }
 
     escape_times = []
@@ -293,9 +296,11 @@ def get_evacuation_statistics(evacuees, target_time=5, use_congestion=False, exi
     success_count = len(escape_times)
     fail_count = total - success_count
 
-    avg_time = 0
-    if success_count > 0:
-        avg_time = sum(escape_times) / success_count
+    avg_time = (
+        sum(escape_times) / success_count
+        if success_count > 0
+        else 0
+    )
 
     return {
         "total": total,
@@ -308,11 +313,16 @@ def get_evacuation_statistics(evacuees, target_time=5, use_congestion=False, exi
         "max_waiting": congestion["max_waiting"],
         "average_waiting_time": congestion["average_waiting_time"],
         "total_congested_people": congestion["total_congested_people"],
-        "congestion_result": congestion["congestion_result"]
+        "congestion_result": congestion["congestion_result"],
     }
 
 
-def print_evacuation_statistics(evacuees, target_time=5, use_congestion=False, exit_capacity=1):
+def print_evacuation_statistics(
+    evacuees,
+    target_time=5,
+    use_congestion=False,
+    exit_capacity=1
+):
     statistics = get_evacuation_statistics(
         evacuees,
         target_time,
@@ -337,7 +347,14 @@ def print_evacuation_statistics(evacuees, target_time=5, use_congestion=False, e
         print(f"대기 발생 인원: {statistics['total_congested_people']}")
 
 
-def get_simulation_state(evacuees, fire_time, t, target_time=5, use_congestion=False, exit_capacity=1):
+def get_simulation_state(
+    evacuees,
+    fire_time,
+    t,
+    target_time=5,
+    use_congestion=False,
+    exit_capacity=1
+):
     update_all_evacuees_by_time(evacuees, t, fire_time)
 
     statistics = get_evacuation_statistics(
@@ -350,5 +367,5 @@ def get_simulation_state(evacuees, fire_time, t, target_time=5, use_congestion=F
     return {
         "time": t,
         "evacuees": evacuees,
-        "statistics": statistics
+        "statistics": statistics,
     }

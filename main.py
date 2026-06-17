@@ -38,6 +38,15 @@ from evacuation import (
     binary_search_time,
     get_evacuation_statistics,
 )
+from risk_analyzer import (
+    calculate_position_risk,
+    calculate_path_risk,
+    get_risk_level,
+)
+from smoke_spread import (
+    simulate_smoke_spread,
+    get_smoke_cells_at_time,
+)
 
 MAP_FILE = os.path.join(os.path.dirname(__file__), "building_map.txt")
 
@@ -133,6 +142,7 @@ C_FLOOR   = [0.96, 0.96, 0.96]   # 일반 통로
 C_CHAR    = [0.55, 0.10, 0.80]   # 대피자(캐릭터) 현재 위치
 C_TRAIL   = [0.80, 0.70, 0.92]   # 지나온 자취
 C_FIREPT  = [0.65, 0.10, 0.05]   # 수동 지정 화재 발화점(시작 전 미리보기)
+C_SMOKE   = [0.60, 0.60, 0.60]   # 연기
 
 FIRE_OK = ('.', 'R')   # 수동 화재 지정 가능 셀
 
@@ -161,7 +171,7 @@ def generate_fire(grid_base, fire_count):
 
 def build_color_array(grid, fire_time, path, start, exits, current_time,
                       char_pos=None, trail=None, fire_preview=None,
-                      trail_on_top=False):
+                      trail_on_top=False, smoke_time=None):
     """
     맵을 rows×cols×3 RGB(float 0~1) 배열로 변환.
     화재 도달은 현재 시각(current_time) 기준. 대피자(char_pos)·지나온 자취(trail)·
@@ -186,6 +196,8 @@ def build_color_array(grid, fire_time, path, start, exits, current_time,
                 img[r][c] = C_TRAIL           # 탈출 완료 후: 화재보다 우선해 경로 표시
             elif fire_time[r][c] <= current_time:
                 img[r][c] = C_FIRE            # 현재 시각 기준 화재 도달
+            elif smoke_time is not None and smoke_time[r][c] != -1 and smoke_time[r][c] <= current_time:
+                img[r][c] = C_SMOKE
             elif pos in preview_set:
                 img[r][c] = C_FIREPT          # 시작 전 수동 화재 발화점 미리보기
             elif cell == 'X':
@@ -204,14 +216,14 @@ def build_color_array(grid, fire_time, path, start, exits, current_time,
 
 
 def build_map_image(grid, fire_time, path, start, exits, current_time, cell_px=12,
-                    char_pos=None, trail=None, fire_preview=None, trail_on_top=False):
+                    char_pos=None, trail=None, fire_preview=None, trail_on_top=False, smoke_time=None):
     """
     색상 배열을 셀당 cell_px 픽셀로 확대한 PIL 이미지로 변환.
     클릭 좌표 → 셀 매핑이 선형이 되도록 축/여백 없이 순수 픽셀로 렌더한다.
     """
     img = build_color_array(grid, fire_time, path, start, exits, current_time,
                             char_pos=char_pos, trail=trail, fire_preview=fire_preview,
-                            trail_on_top=trail_on_top)
+                            trail_on_top=trail_on_top, smoke_time=smoke_time)
     arr = (img * 255).astype(np.uint8)
     big = np.repeat(np.repeat(arr, cell_px, axis=0), cell_px, axis=1)
     return Image.fromarray(big)
@@ -229,7 +241,7 @@ def legend_html():
     items = [
         (C_CHAR, '대피자'), (C_START, '시작(S)'), (C_EXIT, '비상구(X)'),
         (C_FIRE, '화재'), (C_PATH, '예정 경로'), (C_TRAIL, '지나온 길'),
-        (C_ELEV, '엘리베이터(E)'), (C_WALL, '벽(#)'),
+        (C_ELEV, '엘리베이터(E)'), (C_WALL, '벽(#)'), (C_SMOKE, '연기'),
     ]
     return "".join(_swatch(c, l) for c, l in items)
 
@@ -299,6 +311,22 @@ def advance_simulation(grid_base, fire_time, exits):
         st.session_state["visited_n"] = len(visited) if visited else 0
         st.session_state["risky"] = False
         nxt = tuple(path[1])
+
+        # 연기 지역에서는 1턴만 이동 지연
+        smoke_time = st.session_state.get("smoke_time")
+        smoke_waiting = st.session_state.get("smoke_waiting", False)
+
+        if smoke_time is not None and smoke_time[pos[0]][pos[1]] != -1 and smoke_time[pos[0]][pos[1]] <= t:
+            if not smoke_waiting:
+                st.session_state["smoke_slow_count"] += 1
+                st.session_state["smoke_waiting"] = True
+                st.session_state["sim_time"] = t + 1
+                st.session_state["risky"] = True
+                return
+            else:
+                st.session_state["smoke_waiting"] = False
+                st.session_state["risky"] = False
+
         st.session_state["char_pos"] = nxt
         st.session_state["trail"].append(nxt)
         st.session_state["sim_time"] = t + 1
@@ -391,6 +419,9 @@ def _init_sim_state(st):
         "fire_positions": [],
         "evac_total": 0,        # 통계(시작 시 1회 고정)
         "evac_sorted": [],
+        "smoke_time": None,
+        "smoke_slow_count": 0,
+        "smoke_waiting": False,  # 연기 지연 1턴 대기 중인지
         "last_click": None,     # 마지막으로 '처리한' 지도 클릭값 (중복 처리 방지)
     }
     for k, v in defaults.items():
@@ -414,9 +445,11 @@ def _start_simulation(st, grid_base, exits):
         return
 
     fire_time, _log = simulate_fire_spread(grid_base, positions)
-
+    smoke_time = simulate_smoke_spread(grid_base, positions, smoke_speed=2)
+    
     st.session_state["fire_time"] = fire_time
     st.session_state["fire_positions"] = positions
+    st.session_state["smoke_time"] = smoke_time
     st.session_state["phase"] = "running"
     st.session_state["sim_time"] = 0
     st.session_state["char_pos"] = st.session_state["start"]
@@ -441,6 +474,9 @@ def _reset_simulation(st):
     st.session_state["trail"] = []
     st.session_state["plan_path"] = []
     st.session_state["fire_time"] = None
+    st.session_state["smoke_time"] = None
+    st.session_state["smoke_waiting"] = False
+    st.session_state["smoke_slow_count"] = 0
 
 
 def render_streamlit_ui():
@@ -525,6 +561,7 @@ def render_streamlit_ui():
     # ── 현재 화재/경로 상태 준비 ──
     if phase == "running":
         fire_time = st.session_state["fire_time"]
+        smoke_time = st.session_state["smoke_time"]
         current_time = st.session_state["sim_time"]
         char_pos = st.session_state["char_pos"]
         trail = st.session_state["trail"]
@@ -534,6 +571,7 @@ def render_streamlit_ui():
         fire_time = [[INF] * cols for _ in range(rows)]
         current_time = 0
         char_pos = None
+        smoke_time = None
         trail = None
         plan_path = None
         fire_preview = (st.session_state["manual_fires"]
@@ -550,6 +588,7 @@ def render_streamlit_ui():
             grid, fire_time, plan_path, start, exits, current_time, CELL_PX,
             char_pos=char_pos, trail=trail, fire_preview=fire_preview,
             trail_on_top=(st.session_state["char_state"] == "escaped"),
+            smoke_time=smoke_time,
         )
         coords = streamlit_image_coordinates(pil, key="map_click")
         st.markdown(legend_html(), unsafe_allow_html=True)
@@ -623,6 +662,36 @@ def render_streamlit_ui():
             m3.metric("출구 화재 도달", "—")
         st.caption(f"이번 스텝 A* 탐색 노드: {st.session_state['visited_n']}개  ·  "
                    f"화재 발화점: {st.session_state['fire_positions']}")
+        m4, m5 = st.columns(2)
+        m4.metric("연기 지연", f"{st.session_state.get('smoke_slow_count', 0)}회")
+        m5.metric(
+            "연기 영향",
+            "있음" if st.session_state.get("smoke_slow_count", 0) > 0 else "없음"
+        )
+
+
+        # ── 현재 경로 위험도 분석 ──
+        risk_score = calculate_path_risk(
+            st.session_state["plan_path"],
+            st.session_state["fire_time"],
+            st.session_state["sim_time"]
+        )
+
+        risk_level = get_risk_level(risk_score)
+
+        st.divider()
+        st.subheader("⚠️ 현재 경로 위험도")
+
+        r1, r2 = st.columns(2)
+        r1.metric("위험도 점수", f"{risk_score:.1f}")
+        r2.metric("안전 등급", risk_level)
+
+        if risk_level == "위험":
+            st.error("현재 경로는 화재 도달 시간이 가까워 위험합니다.")
+        elif risk_level == "주의":
+            st.warning("현재 경로는 주의가 필요합니다.")
+        else:
+            st.success("현재 경로는 비교적 안전합니다.")
 
         st.divider()
         st.subheader("📊 전체 대피 통계 (랜덤 10명)")
@@ -640,41 +709,40 @@ def render_streamlit_ui():
         s2.metric("평균 탈출시간", f"{avg:.1f}" if success else "—")
         s3.metric(f"t≤{target_time} 인원", f"{under}명")
         st.caption(f"탈출시간 정렬(퀵정렬): {sorted_times}")
+        st.divider()
+        st.subheader("🚪 출구 혼잡도 분석")
 
-    st.divider()
-    st.subheader("🚪 출구 혼잡도 분석")
+        exit_capacity = st.slider(
+            "출구 처리 용량(시간당 인원)",
+            min_value=1,
+            max_value=5,
+            value=1,
+            step=1,
+            key="exit_capacity"
+        )
 
-    exit_capacity = st.slider(
-        "출구 처리 용량(시간당 인원)",
-        min_value=1,
-        max_value=5,
-        value=1,
-        step=1,
-        key="exit_capacity"
-    )
+        st.caption("출구에 동시에 여러 명이 도착하면, 설정한 처리 용량만큼만 탈출하고 나머지는 대기합니다.")
 
-    st.caption("출구에 동시에 여러 명이 도착하면, 설정한 처리 용량만큼만 탈출하고 나머지는 대기합니다.")
+        # 통계용 대피자 데이터를 다시 생성하여 출구 혼잡도 계산
+        evacuees_for_congestion, _ = simulate_evacuees(
+            grid_base,
+            st.session_state["fire_time"],
+            exits,
+            0,
+            n=10
+        )
 
-    # 통계용 대피자 데이터를 다시 생성하여 출구 혼잡도 계산
-    evacuees_for_congestion, _ = simulate_evacuees(
-        grid_base,
-        st.session_state["fire_time"],
-        exits,
-        0,
-        n=10
-    )
+        congestion_stats = get_evacuation_statistics(
+            evacuees_for_congestion,
+            target_time=target_time,
+            use_congestion=True,
+            exit_capacity=exit_capacity
+        )
 
-    congestion_stats = get_evacuation_statistics(
-        evacuees_for_congestion,
-        target_time=target_time,
-        use_congestion=True,
-        exit_capacity=exit_capacity
-    )
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("최대 대기 인원", f"{congestion_stats['max_waiting']}명")
-    c2.metric("평균 대기 시간", f"{congestion_stats['average_waiting_time']:.1f}초")
-    c3.metric("대기 발생 인원", f"{congestion_stats['total_congested_people']}명")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("최대 대기 인원", f"{congestion_stats['max_waiting']}명")
+        c2.metric("평균 대기 시간", f"{congestion_stats['average_waiting_time']:.1f}초")
+        c3.metric("대기 발생 인원", f"{congestion_stats['total_congested_people']}명")
 
 
 def _running_in_streamlit():
