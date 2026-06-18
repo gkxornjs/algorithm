@@ -1,12 +1,11 @@
 # ============================================================
 # path_finder.py
 # 재난 대피 경로 안내 시스템 - 최적 대피 경로 탐색 모듈
-# 담당: 팀원 3
 #
 # 실행 환경: VSCode / Python 3.9+
 # 필요 라이브러리: matplotlib (pip install matplotlib)
 #
-# 자료구조: 우선순위 큐(heapq), 그래프(인접 리스트), 배열
+# 자료구조: 우선순위 큐(heapq), 배열(parent/rank), 그래프(인접 리스트)
 # 알고리즘: A*(최단 경로 탐색), 유니온-파인드(연결성 확인)
 #
 # Input 데이터: RAW_MAP, FIRE_TIME — 직접 구성 (독립 실행용 테스트 데이터)
@@ -28,7 +27,7 @@ plt.rcParams['axes.unicode_minus'] = False
 
 
 # ============================================================
-# 테스트 데이터 (팀원1 map_builder.py 연동 전 독립 실행용)
+# 테스트 데이터 (독립 실행용 — map_builder / fire_spread 연동 전)
 # 데이터 출처: 직접 구성
 # ============================================================
 
@@ -43,8 +42,7 @@ RAW_MAP = [
 ]
 
 # fire_time[r][c] = 화재가 해당 셀에 도달하는 시간
-# (팀원2 fire_spread.py 연동 전 직접 설정)
-# INF = 화재 미도달
+# INF = 화재 미도달 (-1은 연동 시 fire_spread 사용 / INF는 테스트 데이터용)
 INF = float('inf')
 FIRE_TIME = [
     [INF, INF, INF, INF, INF, INF, INF, INF],
@@ -59,17 +57,19 @@ FIRE_TIME = [
 
 # ============================================================
 # 유니온-파인드 (Union-Find)
-# 자료구조: 배열 (parent, rank)
-# 알고리즘: 유니온-파인드 (연결성 실시간 확인)
+# 자료구조: 배열(parent, rank)
+# 알고리즘: 유니온-파인드 — 경로 압축 + 랭크 기반 합치기
 # ============================================================
 
 class UnionFind:
     def __init__(self, n):
+        # 자료구조: 배열(parent) — 각 노드의 루트 저장
         self.parent = list(range(n))
+        # 자료구조: 배열(rank) — 트리 높이 근사값 (Union by Rank)
         self.rank   = [0] * n
 
     def find(self, x):
-        # 경로 압축 (Path Compression)
+        # 알고리즘: 경로 압축 (Path Compression) — find 시 트리를 평탄화
         if self.parent[x] != x:
             self.parent[x] = self.find(self.parent[x])
         return self.parent[x]
@@ -78,7 +78,7 @@ class UnionFind:
         px, py = self.find(x), self.find(y)
         if px == py:
             return
-        # 랭크 기반 합치기 (Union by Rank)
+        # 알고리즘: 랭크 기반 합치기 (Union by Rank) — 낮은 쪽을 높은 쪽 아래에 붙임
         if self.rank[px] < self.rank[py]:
             px, py = py, px
         self.parent[py] = px
@@ -91,12 +91,12 @@ class UnionFind:
 
 def build_union_find(grid, fire_time, current_time):
     """
-    현재 시간(current_time) 기준으로
-    화재가 없는 통로 셀만 유니온-파인드로 연결
+    current_time 기준 화재가 없는 통로 셀만 유니온-파인드로 연결.
     자료구조: 유니온-파인드
     알고리즘: 유니온-파인드 (연결성 확인)
     """
     rows, cols = len(grid), len(grid[0])
+    # 자료구조: 유니온-파인드 (rows*cols 노드)
     uf = UnionFind(rows * cols)
 
     def idx(r, c):
@@ -106,21 +106,22 @@ def build_union_find(grid, fire_time, current_time):
         for c in range(cols):
             if grid[r][c] == '#':
                 continue
-            # 화재 도달 셀 제외
-            if fire_time[r][c] <= current_time:
+            # -1은 화재 미도달(안전) / 양수면 현재 시각과 비교
+            if fire_time[r][c] != -1 and fire_time[r][c] <= current_time:
                 continue
-            # 오른쪽, 아래 방향으로 연결
             for dr, dc in [(0, 1), (1, 0)]:
                 nr, nc = r + dr, c + dc
                 if 0 <= nr < rows and 0 <= nc < cols:
-                    if grid[nr][nc] != '#' and fire_time[nr][nc] > current_time:
-                        uf.union(idx(r, c), idx(nr, nc))
+                    if grid[nr][nc] != '#':
+                        # 이웃도 안전한 경우에만 연결
+                        if fire_time[nr][nc] == -1 or fire_time[nr][nc] > current_time:
+                            uf.union(idx(r, c), idx(nr, nc))
     return uf
 
 
 def is_escape_possible(grid, fire_time, start, exits, current_time):
     """
-    유니온-파인드로 출구까지 연결 여부 확인
+    유니온-파인드로 start → 출구 연결 여부 확인.
     알고리즘: 유니온-파인드 (연결성 확인)
     """
     rows, cols = len(grid), len(grid[0])
@@ -131,7 +132,8 @@ def is_escape_possible(grid, fire_time, start, exits, current_time):
 
     sr, sc = start
     for er, ec in exits:
-        if fire_time[er][ec] > current_time:  # 출구도 화재 미도달이어야 함
+        # -1은 미도달(항상 안전), 양수면 미래 도달 시간 비교
+        if fire_time[er][ec] == -1 or fire_time[er][ec] > current_time:
             if uf.connected(idx(sr, sc), idx(er, ec)):
                 return True, (er, ec)
     return False, None
@@ -139,35 +141,34 @@ def is_escape_possible(grid, fire_time, start, exits, current_time):
 
 # ============================================================
 # A* 알고리즘
-# 자료구조: 우선순위 큐(heapq), 그래프(인접 리스트)
-# 알고리즘: A* (최단 탈출 경로 탐색)
+# 자료구조: 우선순위 큐(heapq), 딕셔너리(g_cost, came_from)
+# 알고리즘: A* — 맨해튼 거리 휴리스틱 + 화재 도달 시각 기반 장벽 처리
 # ============================================================
 
 def heuristic(a, b):
-    """
-    맨해튼 거리 휴리스틱
-    그리드 맵에서 대각선 이동 없으므로 맨해튼 거리 사용
-    알고리즘: A* 휴리스틱 함수
-    """
+    """맨해튼 거리 휴리스틱 — 대각선 이동 없는 그리드에 최적."""
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
 def astar(grid, fire_time, start, goal, current_time):
     """
-    A* 알고리즘으로 start → goal 최단 경로 탐색
-    화재 도달 셀은 이동 불가 처리 (가중치 무한대)
-    자료구조: 우선순위 큐(heapq)
-    알고리즘: A* (최단 경로 탐색)
+    A* 알고리즘으로 start → goal 최단 경로 탐색.
+    도착 시점(current_time + 이동 거리) 기준으로 화재 차단 여부 판단.
+    fire_time == -1 인 셀은 화재 미도달(안전)로 처리.
+
+    자료구조: 우선순위 큐(heapq) — (f, g, pos) 형태로 관리
+    알고리즘: A* 최단 경로 탐색
     """
     rows, cols = len(grid), len(grid[0])
-    directions = [(-1,0),(1,0),(0,-1),(0,1)]
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
-    # 우선순위 큐: (f, g, (r, c))
-    # 자료구조: 우선순위 큐(heapq)
+    # 자료구조: 우선순위 큐(heapq) — (f값, g값, 현재 위치)
     open_list = []
     heapq.heappush(open_list, (0, 0, start))
 
+    # 자료구조: 딕셔너리(g) — 시작점에서 각 셀까지의 최소 이동 비용
     g = {start: 0}
+    # 자료구조: 딕셔너리(came_from) — 경로 역추적용 부모 셀
     came_from  = {start: None}
     visited    = set()
     visited_order = []   # 탐색 순서 기록 (시각화용)
@@ -181,7 +182,7 @@ def astar(grid, fire_time, start, goal, current_time):
         visited_order.append(current)
 
         if current == goal:
-            # 경로 복원
+            # 알고리즘: 경로 역추적 — came_from 딕셔너리를 따라 역방향 복원
             path = []
             node = current
             while node is not None:
@@ -198,18 +199,16 @@ def astar(grid, fire_time, start, goal, current_time):
                 continue
 
             new_g = g[current] + 1
-            # 도착 시점(current_time + new_g) 기준으로 화재 여부 판단
-            # current_time 기준으로만 체크하면 이동 중 화재에 따라잡히는 경우를 못 막음
-            if fire_time[nr][nc] <= current_time + new_g:
+            # -1은 미도달(안전) / 양수면 도착 예정 시각과 비교해 화재 회피
+            if fire_time[nr][nc] != -1 and fire_time[nr][nc] <= current_time + new_g:
                 continue
             if new_g < g.get((nr, nc), INF):
                 g[(nr, nc)] = new_g
                 h = heuristic((nr, nc), goal)
-                f_val = new_g + h
-                heapq.heappush(open_list, (f_val, new_g, (nr, nc)))
+                heapq.heappush(open_list, (new_g + h, new_g, (nr, nc)))
                 came_from[(nr, nc)] = current
 
-    return None, INF, visited_order  # 경로 없음
+    return None, INF, visited_order   # 경로 없음
 
 
 # ============================================================
@@ -218,12 +217,12 @@ def astar(grid, fire_time, start, goal, current_time):
 
 def find_best_exit(grid, fire_time, start, exits, current_time):
     """
-    다중 출구 중 A*로 가장 가까운 출구 탐색
+    다중 출구 중 A*로 가장 가까운 출구 탐색.
     알고리즘: A* (다중 출구 최적 선택)
     """
-    best_path = None
-    best_dist = INF
-    best_exit = None
+    best_path    = None
+    best_dist    = INF
+    best_exit    = None
     best_visited = None
 
     for exit_pos in exits:
@@ -231,12 +230,118 @@ def find_best_exit(grid, fire_time, start, exits, current_time):
             grid, fire_time, start, exit_pos, current_time
         )
         if path and dist < best_dist:
-            best_dist     = dist
-            best_path     = path
-            best_exit     = exit_pos
-            best_visited  = visited_order
+            best_dist    = dist
+            best_path    = path
+            best_exit    = exit_pos
+            best_visited = visited_order
 
     return best_path, best_dist, best_exit, best_visited
+
+
+# ============================================================
+# 다중 층 A* (층간 이동 포함)
+# 자료구조: 우선순위 큐(heapq), 딕셔너리(g_cost, came_from)
+# 알고리즘: A* — 노드 = (층, 행, 열), 계단 셀에서 아래 층으로 전이
+# ============================================================
+
+def find_multi_floor_path(floor_grids, fire_times, stair_positions,
+                           start_floor, start_pos, current_time=0):
+    """
+    다중 층 A* 대피 경로 탐색.
+
+    floor_grids     : {floor_num: [[char]]}
+    fire_times      : {floor_num: [[float]]}  — 화재 발생 층만 포함 (나머지 INF 처리)
+    stair_positions : [(r, c)]               — 모든 층 동일 위치의 계단
+    start_floor     : 시작 층 번호
+    start_pos       : (r, c)
+    current_time    : 현재 시각 (화재 회피 판단 기준)
+
+    반환: [(floor_num, r, c), ...] 또는 None
+    """
+    # 자료구조: 집합(set) — 계단 위치 빠른 조회
+    stair_set = {tuple(s) for s in stair_positions}
+
+    # 전 층의 비상구(X) 수집 — 자료구조: 집합(set)
+    all_exits = set()
+    for fnum, grid in floor_grids.items():
+        for r, row in enumerate(grid):
+            for c, cell in enumerate(row):
+                if cell == 'X':
+                    all_exits.add((fnum, r, c))
+
+    start_node = (start_floor, start_pos[0], start_pos[1])
+    if start_node in all_exits:
+        return [start_node]
+
+    def h(node):
+        """맨해튼 거리 + 층간 거리 합산 휴리스틱."""
+        fn, r, c = node
+        return min(
+            abs(r - gr) + abs(c - gc) + abs(fn - gf)
+            for gf, gr, gc in all_exits
+        )
+
+    # 자료구조: 우선순위 큐(heapq) — (f값, g값, 노드)
+    open_list = [(h(start_node), 0, start_node)]
+    # 자료구조: 딕셔너리(g_cost, came_from) — 비용 및 경로 역추적
+    g_cost    = {start_node: 0}
+    came_from = {start_node: None}
+    visited   = set()
+
+    while open_list:
+        _, g_cur, node = heapq.heappop(open_list)
+        floor_num, r, c = node
+
+        if node in visited:
+            continue
+        visited.add(node)
+
+        if node in all_exits:
+            # 알고리즘: 경로 역추적
+            path = []
+            n = node
+            while n is not None:
+                path.append(n)
+                n = came_from[n]
+            return path[::-1]
+
+        grid = floor_grids[floor_num]
+        rows, cols = len(grid), len(grid[0])
+        ft = fire_times.get(floor_num)
+
+        # ── 같은 층 상하좌우 이동 ──────────────────────────────────────────
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < rows and 0 <= nc < cols):
+                continue
+            if grid[nr][nc] == '#':
+                continue
+            new_g = g_cur + 1
+            # -1은 미도달(안전) / 양수면 도착 예정 시각과 비교
+            if ft is not None and ft[nr][nc] != -1 and ft[nr][nc] <= current_time + new_g:
+                continue
+            nnode = (floor_num, nr, nc)
+            if nnode not in visited and new_g < g_cost.get(nnode, INF):
+                g_cost[nnode] = new_g
+                heapq.heappush(open_list, (new_g + h(nnode), new_g, nnode))
+                came_from[nnode] = node
+
+        # ── 계단: 아래 층으로 전이 ────────────────────────────────────────
+        # 알고리즘: 계단 셀 도달 시 floor_num-1 층으로 전이 (하강만 허용)
+        if (r, c) in stair_set:
+            lower = sorted([f for f in floor_grids if f < floor_num], reverse=True)
+            if lower:
+                lf = lower[0]
+                lg = floor_grids[lf]
+                if 0 <= r < len(lg) and 0 <= c < len(lg[0]) and lg[r][c] != '#':
+                    new_g = g_cur + 1
+                    nnode = (lf, r, c)
+                    if nnode not in visited and new_g < g_cost.get(nnode, INF):
+                        g_cost[nnode] = new_g
+                        heapq.heappush(open_list, (new_g + h(nnode), new_g, nnode))
+                        came_from[nnode] = node
+
+    return None
 
 
 # ============================================================
@@ -244,14 +349,12 @@ def find_best_exit(grid, fire_time, start, exits, current_time):
 # ============================================================
 
 def parse_map(grid):
-    """맵에서 시작 위치, 화재 위치, 출구 위치 추출"""
+    """맵에서 시작(S), 화재(F), 출구(X/E) 위치 추출."""
     start  = None
     fire   = []
     exits  = []
-    rows, cols = len(grid), len(grid[0])
-
-    for r in range(rows):
-        for c in range(cols):
+    for r in range(len(grid)):
+        for c in range(len(grid[r])):
             if grid[r][c] == 'S':
                 start = (r, c)
             elif grid[r][c] == 'F':
@@ -262,19 +365,13 @@ def parse_map(grid):
 
 
 def print_map(grid, path=None, visited=None):
-    """
-    맵 출력
-    - 최적 경로: * 표시
-    - 탐색 노드: · 표시 (시각화용)
-    """
-    rows, cols = len(grid), len(grid[0])
-    path_set    = set(path) if path else set()
+    """맵 텍스트 출력 (* = 경로, · = A* 탐색 노드)."""
+    path_set    = set(path)    if path    else set()
     visited_set = set(visited) if visited else set()
-
     print()
-    for r in range(rows):
+    for r in range(len(grid)):
         row_str = ''
-        for c in range(cols):
+        for c in range(len(grid[r])):
             cell = grid[r][c]
             pos  = (r, c)
             if cell in ('S', 'E', 'F', '#'):
@@ -291,18 +388,19 @@ def print_map(grid, path=None, visited=None):
 
 # ============================================================
 # 시각화
-# 자료구조: 2D 배열
+# 자료구조: 2D 배열 (color_map)
 # ============================================================
 
-def visualize(grid, fire_time, path_a, visited_a, start, exits, current_time, title=""):
+def visualize(grid, fire_time, path_a, visited_a, _start, _exits, current_time, title=""):
     """
-    A* 탐색 결과 시각화
-    - 파란색: 탐색한 노드
+    A* 탐색 결과 시각화 (matplotlib).
+    - 파란색: A* 탐색 노드
     - 주황색: 최단 경로
-    - 빨간색: 화재 셀
+    - 빨간색: 화재 도달 셀
     """
     rows, cols = len(grid), len(grid[0])
 
+    # 자료구조: 2D 배열(color_map) — 각 셀의 RGB 색상 저장
     color_map = []
     for r in range(rows):
         row = []
@@ -310,26 +408,25 @@ def visualize(grid, fire_time, path_a, visited_a, start, exits, current_time, ti
             cell = grid[r][c]
             pos  = (r, c)
             if cell == '#':
-                row.append([0.2, 0.2, 0.2])       # 벽 (진회색)
-            elif fire_time[r][c] <= current_time:
-                row.append([0.9, 0.3, 0.2])        # 화재 (빨강)
+                row.append([0.2, 0.2, 0.2])       # 벽
+            elif fire_time[r][c] != -1 and fire_time[r][c] <= current_time:
+                row.append([0.9, 0.3, 0.2])        # 화재
             elif cell == 'S':
-                row.append([0.2, 0.7, 0.4])        # 시작 (초록)
+                row.append([0.2, 0.7, 0.4])        # 시작
             elif cell == 'E':
-                row.append([0.2, 0.5, 0.9])        # 출구 (파랑)
+                row.append([0.2, 0.5, 0.9])        # 출구
             elif path_a and pos in set(path_a):
-                row.append([1.0, 0.6, 0.1])        # 경로 (주황)
+                row.append([1.0, 0.6, 0.1])        # 경로
             elif visited_a and pos in set(visited_a):
-                row.append([0.75, 0.85, 1.0])      # 탐색 노드 (연파랑)
+                row.append([0.75, 0.85, 1.0])      # 탐색 노드
             else:
-                row.append([0.95, 0.95, 0.95])     # 일반 통로 (흰색)
+                row.append([0.95, 0.95, 0.95])     # 일반 통로
         color_map.append(row)
 
     fig, ax = plt.subplots(figsize=(cols * 0.9, rows * 0.9))
     ax.imshow(color_map, aspect='equal')
 
-    # 셀 텍스트 표시
-    path_set    = set(path_a) if path_a else set()
+    path_set    = set(path_a)    if path_a    else set()
     visited_set = set(visited_a) if visited_a else set()
 
     for r in range(rows):
@@ -342,7 +439,7 @@ def visualize(grid, fire_time, path_a, visited_a, start, exits, current_time, ti
             elif cell == 'E':
                 ax.text(c, r, 'E', ha='center', va='center',
                         fontsize=13, fontweight='bold', color='white')
-            elif cell == 'F' or fire_time[r][c] <= current_time:
+            elif cell == 'F' or (fire_time[r][c] != -1 and fire_time[r][c] <= current_time):
                 ax.text(c, r, 'F', ha='center', va='center',
                         fontsize=11, color='white')
             elif pos in path_set:
@@ -352,13 +449,11 @@ def visualize(grid, fire_time, path_a, visited_a, start, exits, current_time, ti
                 ax.text(c, r, '·', ha='center', va='center',
                         fontsize=10, color='#666')
 
-    # 그리드 선
     for x in range(cols + 1):
         ax.axvline(x - 0.5, color='gray', linewidth=0.5, alpha=0.5)
     for y in range(rows + 1):
         ax.axhline(y - 0.5, color='gray', linewidth=0.5, alpha=0.5)
 
-    # 범례
     legend_els = [
         mpatches.Patch(color=[0.2, 0.7, 0.4], label='시작 (S)'),
         mpatches.Patch(color=[0.2, 0.5, 0.9], label='출구 (E)'),
@@ -380,10 +475,7 @@ def visualize(grid, fire_time, path_a, visited_a, start, exits, current_time, ti
 # ============================================================
 
 def run(grid=None, fire_time=None, current_time=0):
-    """
-    path_finder 메인 실행 함수
-    grid, fire_time 미입력 시 테스트 데이터 사용
-    """
+    """path_finder 메인 실행 함수. 미입력 시 테스트 데이터 사용."""
     if grid is None:
         grid = RAW_MAP
     if fire_time is None:
@@ -433,54 +525,47 @@ def run(grid=None, fire_time=None, current_time=0):
         print("❌ 탈출 불가 — 경로를 찾을 수 없습니다.")
         return None
 
-    # ── 결과 출력 ──
     print(f"✅ 최적 경로 탐색 완료")
     print(f"   경로    : {' → '.join(str(p) for p in path)}")
     print(f"   이동 거리: {dist}칸")
-    print(f"   탐색 노드: {len(visited_order)}개 / 전체 통로 노드")
+    print(f"   탐색 노드: {len(visited_order)}개")
     print(f"   실행 시간: {astar_time*1000:.3f}ms")
     print()
 
-    # 화재 도달 전 탈출 가능 여부
     goal = path[-1]
     fire_arrival = fire_time[goal[0]][goal[1]]
-    if dist < fire_arrival:
-        print(f"✅ 탈출 가능 — 이동 거리 {dist}칸 < 화재 도달 t={fire_arrival}")
+    if fire_arrival == -1 or dist < fire_arrival:
+        print(f"✅ 탈출 가능 — 이동 거리 {dist}칸 (화재 미도달 또는 t={fire_arrival}보다 빠름)")
     else:
         print(f"⚠️  주의 — 이동 거리 {dist}칸 ≥ 화재 도달 t={fire_arrival}")
 
-    # 맵 출력 (* = 경로, · = 탐색 노드)
     print("\n[ 대피 경로 맵 ]  (* = 최단 경로, · = A* 탐색 노드)")
     print_map(grid, path, visited_order)
 
-    # 시각화
     visualize(
         grid, fire_time, path, visited_order,
         start, exits, current_time,
         title=f"A* 최단 대피 경로 탐색  (t={current_time})"
     )
-
     return path
 
 
 # ============================================================
-# 팀원2 연동 함수 (fire_spread.py에서 호출)
+# 팀원2 연동 함수
 # ============================================================
 
 def get_escape_path(grid, graph, fire_time, current_time=0):
     """
-    연동용 함수: (path, dist, possible) 튜플 반환
-    graph: map_builder 인접 리스트 (내부 미사용, 인터페이스 호환용)
-    fire_time: fire_spread가 계산한 화재 도달 시간 2D 배열 (미도달=float('inf'))
+    연동용 함수: (path, dist, possible) 튜플 반환.
+    graph: map_builder 인접 리스트 (인터페이스 호환용, 내부 미사용)
+    fire_time: fire_spread가 계산한 화재 도달 시간 2D 배열 (-1 = 미도달)
     """
     _, _, exits = parse_map(grid)
 
-    # parse_map이 출구를 못 찾으면 graph에서 추출
     if not exits and graph:
         exits = [pos for pos in graph if grid[pos[0]][pos[1]] == 'X']
 
     possible, _ = is_escape_possible(grid, fire_time, *_find_start(grid), exits, current_time)
-
     path = run(grid, fire_time, current_time)
     if path is None:
         return None, INF, False
@@ -490,7 +575,7 @@ def get_escape_path(grid, graph, fire_time, current_time=0):
 
 
 def _find_start(grid):
-    """grid에서 'S' 위치 반환"""
+    """grid에서 'S' 위치 반환."""
     for r, row in enumerate(grid):
         for c, cell in enumerate(row):
             if cell == 'S':
@@ -503,10 +588,8 @@ def _find_start(grid):
 # ============================================================
 
 if __name__ == "__main__":
-    # 기본 실행 (t=0 기준)
     run()
 
-    # 화재가 더 번진 상황 (t=3 기준)
     print("\n" + "=" * 50)
     print(" t=3 시점 — 화재 확산 후 재탐색")
     print("=" * 50)

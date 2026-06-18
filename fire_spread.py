@@ -27,181 +27,160 @@ def is_valid(grid, r, c):
 
 
 def count_adjacent_walls(grid, r, c):
+    """상하좌우 이웃 중 벽(#) 개수 반환 — 그리디 우선순위 계산에 사용."""
     wall_count = 0
-
     for dr, dc in DIRECTIONS:
         nr, nc = r + dr, c + dc
-
         if not is_valid(grid, nr, nc) or grid[nr][nc] == WALL:
             wall_count += 1
-
     return wall_count
 
 
 def get_random_fire_position(grid):
     positions = generate_fire_positions(grid, 1)
-
-    if not positions:
-        return None
-
-    return positions[0]
+    return positions[0] if positions else None
 
 
 def generate_fire_positions(grid, count=1):
-    candidates = []
-
-    for r in range(len(grid)):
-        for c in range(len(grid[r])):
-            if grid[r][c] in [EMPTY, START, FIRE]:
-                candidates.append((r, c))
-
+    # 자료구조: 리스트(후보 셀 목록)
+    candidates = [
+        (r, c)
+        for r in range(len(grid))
+        for c in range(len(grid[r]))
+        if grid[r][c] in [EMPTY, START, FIRE]
+    ]
     if not candidates:
         return []
-
     count = min(count, len(candidates))
     return random.sample(candidates, count)
 
 
 def get_neighbors_by_greedy(grid, r, c):
-    # 알고리즘: 그리디 — 벽 인접 수가 적은 개방 칸 우선 확산
+    """
+    알고리즘: 그리디 — 벽 인접 수가 적은 개방 칸(복도) 우선으로 확산.
+    벽이 많은 좁은 칸보다 탁 트인 복도로 먼저 번지는 실제 화재 특성을 근사.
+    """
+    # 자료구조: 리스트(이웃 후보), 정렬 기준 = 벽 인접 수(그리디)
     neighbors = []
-
     for dr, dc in DIRECTIONS:
         nr, nc = r + dr, c + dc
-
         if is_valid(grid, nr, nc) and grid[nr][nc] != WALL:
             wall_count = count_adjacent_walls(grid, nr, nc)
             neighbors.append((wall_count, nr, nc))
+    neighbors.sort()   # 알고리즘: 그리디 정렬 (벽 인접 수 오름차순)
+    return [(nr, nc) for _, nr, nc in neighbors]
 
-    neighbors.sort()
-    return [(nr, nc) for wall_count, nr, nc in neighbors]
 
+def simulate_fire_spread(grid, fire_positions, fire_speed=1.0):
+    """
+    BFS 기반 화재 확산 시뮬레이션.
 
-def simulate_fire_spread(grid, fire_positions):
+    fire_speed 파라미터:
+      - 1.0 = 매 턴 1칸 확산 (기본값)
+      - 0.13 ≈ 7.7턴에 1칸 (복도 화재 ~0.4 m/s / 사람 ~2.5 m/s 기반)
+
+    fire_time[r][c]:
+      - -1   : 화재 미도달 (벽 또는 고립 구역)
+      -  0   : 발화 위치
+      - 양수  : 해당 시각에 화재 도달
+    """
     rows = len(grid)
     cols = len(grid[0])
 
-    fire_time = [[-1 for _ in range(cols)] for _ in range(rows)]  # 자료구조: 2D 배열(fire_time)
-    queue = deque()  # 자료구조: 큐(deque) / 알고리즘: BFS 화재확산
+    # 자료구조: 2D 배열(fire_time) — 각 셀의 화재 도달 시각
+    fire_time = [[-1] * cols for _ in range(rows)]
+    # 자료구조: 큐(deque) / 알고리즘: BFS 화재 확산
+    queue = deque()
+    # 자료구조: 딕셔너리(fire_log) — 시각별 확산 셀 기록
     fire_log = {}
+    step = 1.0 / fire_speed   # 한 칸 확산에 걸리는 시간
 
     if fire_positions is None:
         fire_positions = []
-
     if isinstance(fire_positions, tuple):
         fire_positions = [fire_positions]
 
-    print("=== 화재 확산 시뮬레이션 시작 ===")
-
+    # ── 발화 위치 초기화 ──
     for fr, fc in fire_positions:
-        if not is_valid(grid, fr, fc):
+        if not is_valid(grid, fr, fc) or grid[fr][fc] == WALL:
             continue
-
-        if grid[fr][fc] == WALL:
-            continue
-
         fire_time[fr][fc] = 0
         queue.append((fr, fc))
+        fire_log.setdefault(0, []).append((fr, fc))
 
-        if 0 not in fire_log:
-            fire_log[0] = []
-
-        fire_log[0].append((fr, fc))
-        print(f"t=0: 화재 발생 위치 ({fr}, {fc})")
-
+    # ── BFS 확산 ──────────────────────────────────────────────────────────────
+    # 알고리즘: BFS — 가중 거리(step) 기반 확산, 그리디 이웃 순서 적용
     while queue:
         r, c = queue.popleft()
         current_time = fire_time[r][c]
 
         for nr, nc in get_neighbors_by_greedy(grid, r, c):
-            if fire_time[nr][nc] == -1:
-                fire_time[nr][nc] = current_time + 1
+            if fire_time[nr][nc] == -1:          # 아직 미방문 셀만 처리
+                fire_time[nr][nc] = current_time + step
                 queue.append((nr, nc))
-
-                if current_time + 1 not in fire_log:
-                    fire_log[current_time + 1] = []
-
-                fire_log[current_time + 1].append((nr, nc))
-
-    for time in sorted(fire_log.keys()):
-        if time == 0:
-            continue
-
-        print(f"t={time}: 화재 확산 -> {fire_log[time]}")
+                t_key = round(current_time + step, 6)
+                fire_log.setdefault(t_key, []).append((nr, nc))
 
     return fire_time, fire_log
 
 
 def get_fire_cells_at_time(fire_time, t):
-    fire_cells = []
-
-    for r in range(len(fire_time)):
-        for c in range(len(fire_time[r])):
-            if fire_time[r][c] != -1 and fire_time[r][c] <= t:
-                fire_cells.append((r, c))
-
-    return fire_cells
+    """t 시각 이전에 화재가 도달한 모든 셀 반환."""
+    return [
+        (r, c)
+        for r in range(len(fire_time))
+        for c in range(len(fire_time[r]))
+        if fire_time[r][c] != -1 and fire_time[r][c] <= t
+    ]
 
 
 def get_new_fire_cells_at_time(fire_time, t):
-    fire_cells = []
-
-    for r in range(len(fire_time)):
-        for c in range(len(fire_time[r])):
-            if fire_time[r][c] == t:
-                fire_cells.append((r, c))
-
-    return fire_cells
+    """정확히 t 시각에 화재가 도달한 셀만 반환."""
+    return [
+        (r, c)
+        for r in range(len(fire_time))
+        for c in range(len(fire_time[r]))
+        if fire_time[r][c] == t
+    ]
 
 
 def print_fire_map_at_time(grid, fire_time, t):
     print(f"\n=== t={t} 화재 상태 ===")
-
     for r in range(len(grid)):
         row = []
-
         for c in range(len(grid[r])):
             if fire_time[r][c] != -1 and fire_time[r][c] <= t:
                 row.append("🔥")
             else:
                 row.append(grid[r][c])
-
         print(" ".join(row))
 
 
 def get_fire_map_at_time(grid, fire_time, t):
+    # 자료구조: 2D 배열(current_map)
     current_map = []
-
     for r in range(len(grid)):
-        row = []
-
-        for c in range(len(grid[r])):
-            if fire_time[r][c] != -1 and fire_time[r][c] <= t:
-                row.append("🔥")
-            else:
-                row.append(grid[r][c])
-
+        row = [
+            "🔥" if fire_time[r][c] != -1 and fire_time[r][c] <= t
+            else grid[r][c]
+            for c in range(len(grid[r]))
+        ]
         current_map.append(row)
-
     return current_map
 
 
 def get_exit_fire_times(fire_time, exits):
     print("\n=== 출구 화재 도달 시간 ===")
-
     result = {}
-
-    for exit_pos in exits:
-        r, c = exit_pos
+    for r, c in exits:
         time = fire_time[r][c]
-        result[exit_pos] = time
-
+        result[(r, c)] = time
         if time == -1:
-            print(f"출구 {exit_pos}: 화재 미도달")
+            print(f"출구 ({r},{c}): 화재 미도달")
         else:
-            print(f"출구 도달 예상 시간: t={time} -> 출구 {exit_pos}")
-
+            print(f"출구 ({r},{c}): t={time:.1f}에 도달")
     return result
+
 
 def get_random_fire_positions(grid, count=1):
     return generate_fire_positions(grid, count)

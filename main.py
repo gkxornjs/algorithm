@@ -9,8 +9,9 @@
 # 필요 라이브러리: requirements.txt 참고
 #   matplotlib, numpy, Pillow, streamlit, streamlit-image-coordinates
 #
-# 자료구조: 2D 배열(맵/화재), 딕셔너리(session_state), 우선순위 큐(A* 내부)
-# 알고리즘: A*(최단 경로 탐색), BFS(화재 확산), 퀵 정렬, 이진 탐색, 유니온-파인드
+# 자료구조: 2D 배열(맵/화재/연기), 딕셔너리(session_state), 집합(set), 우선순위 큐(A* 내부)
+# 알고리즘: A*(최단 경로), 다중 층 A*(층간 이동), BFS(화재/연기 확산),
+#           유니온-파인드(연결성 확인), 퀵 정렬(탈출 시간), 이진 탐색(목표 시간 내 인원)
 #
 # Input 데이터: building_map.txt — 직접 구성 (가천대학교 AI공학관 기반)
 # ============================================================
@@ -30,7 +31,7 @@ from fire_spread import (
     get_random_fire_positions,
     get_exit_fire_times,
 )
-from path_finder import get_escape_path, find_best_exit
+from path_finder import get_escape_path, find_best_exit, find_multi_floor_path
 from evacuation import (
     create_evacuee_dict,
     update_evacuee_result,
@@ -51,13 +52,17 @@ from smoke_spread import (
 
 MAP_FILE = os.path.join(os.path.dirname(__file__), "building_map.txt")
 
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 MAP_FILES = {
-    3: os.path.join(os.path.dirname(__file__), "floor3_map.txt"),
-    4: os.path.join(os.path.dirname(__file__), "floor4_map.txt"),
-    5: os.path.join(os.path.dirname(__file__), "floor5_map.txt"),
+    3: os.path.join(_DATA_DIR, "floor3_map.txt"),
+    4: os.path.join(_DATA_DIR, "floor4_map.txt"),
+    5: os.path.join(_DATA_DIR, "floor5_map.txt"),
 }
 
 PASSABLE = {'.', 'R', 'X', 'E', 'S', 'F', 'T'}
+
+# 계단 셀 위치 (모든 층 동일)
+STAIR_POSITIONS = [(5, 5), (50, 5)]
 
 # ── 다중 층 3D 빌딩 상수 ──────────────────────────────────────────────────────
 # 층간 3.2 / 벽은 키 크고 반투명(0.28) → 화재·연기가 측면 투시로 보임
@@ -207,7 +212,9 @@ def make_grid_with_start(grid_base, start):
 
 
 def generate_fire(grid_base, fire_count):
-    """랜덤 화재 발생 후 BFS 확산 시뮬레이션. fire_time/positions/log 반환."""
+    """랜덤 화재 발생 후 BFS 확산 시뮬레이션. fire_time/positions/log 반환.
+    알고리즘: BFS (화재 확산) — fire_spread.simulate_fire_spread 호출
+    """
     positions = get_random_fire_positions(grid_base, fire_count)
     fire_time, fire_log = simulate_fire_spread(grid_base, positions)
     return fire_time, positions, fire_log
@@ -221,12 +228,16 @@ def build_color_array(grid, fire_time, path, start, exits, current_time,
     화재 도달은 현재 시각(current_time) 기준. 대피자(char_pos)·지나온 자취(trail)·
     예정 경로(path)·수동 화재 발화점(fire_preview)을 함께 그린다.
     trail_on_top=True면(탈출 완료 후) 자취를 화재 위에 그려 가려진 경로까지 보여준다.
+
+    자료구조: 2D 배열(fire_time, smoke_time), 집합(set) — 경로/자취 빠른 조회
     """
     rows, cols = len(grid), len(grid[0])
+    # 자료구조: 집합(set) — O(1) 조회를 위한 경로·자취·미리보기 집합화
     path_set    = set(path) if path else set()
     trail_set   = set(trail) if trail else set()
     preview_set = set(fire_preview) if fire_preview else set()
 
+    # 자료구조: 2D 배열(img) — rows×cols×3 RGB 픽셀 배열 (numpy)
     img = np.zeros((rows, cols, 3))
     for r in range(rows):
         for c in range(cols):
@@ -238,8 +249,8 @@ def build_color_array(grid, fire_time, path, start, exits, current_time,
                 img[r][c] = C_CHAR            # 대피자 현재 위치 (최우선)
             elif trail_on_top and pos in trail_set:
                 img[r][c] = C_TRAIL           # 탈출 완료 후: 화재보다 우선해 경로 표시
-            elif fire_time[r][c] <= current_time:
-                img[r][c] = C_FIRE            # 현재 시각 기준 화재 도달
+            elif fire_time[r][c] != -1 and fire_time[r][c] <= current_time:
+                img[r][c] = C_FIRE            # 현재 시각 기준 화재 도달 (-1=미도달 제외)
             elif smoke_time is not None and smoke_time[r][c] != -1 and smoke_time[r][c] <= current_time:
                 img[r][c] = C_SMOKE
             elif pos in preview_set:
@@ -290,6 +301,64 @@ def legend_html():
         (C_ELEV, '엘리베이터(E)'), (C_STAIR, '계단(T)'), (C_WALL, '벽(#)'), (C_SMOKE, '연기'),
     ]
     return "".join(_swatch(c, l) for c, l in items)
+
+
+def build_heatmap_image(grid, fire_time, evacuee_paths=None, cell_px=12):
+    """
+    위험도 히트맵: 화재 도달 속도(65%) + 경로 병목 빈도(35%) 결합.
+    score = danger * 0.65 + bottleneck * 0.35
+    빨강=위험 / 초록=안전 / 파랑=비상구 / 주황=계단
+
+    자료구조: 2D 배열(fire_time, freq), numpy 배열(img)
+    알고리즘: 위험도 점수 계산 (정규화 + 가중 합산)
+    """
+    rows, cols = len(grid), len(grid[0])
+
+    valid_ft = [
+        fire_time[r][c]
+        for r in range(rows) for c in range(cols)
+        if fire_time[r][c] not in (-1, float('inf')) and fire_time[r][c] > 0
+    ]
+    max_ft = max(valid_ft) if valid_ft else 1.0
+
+    freq = [[0] * cols for _ in range(rows)]
+    if evacuee_paths:
+        for path in evacuee_paths:
+            for pos in path:
+                r, c = pos
+                if 0 <= r < rows and 0 <= c < cols:
+                    freq[r][c] += 1
+    max_freq = max(freq[r][c] for r in range(rows) for c in range(cols)) or 1
+
+    img = np.zeros((rows, cols, 3))
+    for r in range(rows):
+        for c in range(cols):
+            cell = grid[r][c]
+            if cell == '#':
+                img[r][c] = [0.15, 0.15, 0.15]
+                continue
+            if cell == 'X':
+                img[r][c] = [0.0, 0.4, 1.0]
+                continue
+            if cell == 'T':
+                img[r][c] = [1.0, 0.65, 0.0]
+                continue
+
+            ft = fire_time[r][c]
+            danger = 0.0 if ft in (-1, float('inf')) else 1.0 - min(ft / max_ft, 1.0)
+            bottle = freq[r][c] / max_freq if evacuee_paths else 0.0
+            score  = min(danger * 0.65 + bottle * 0.35, 1.0)
+
+            if score < 0.5:
+                t2 = score * 2
+                img[r][c] = [t2, 1.0, 0.0]
+            else:
+                t2 = (score - 0.5) * 2
+                img[r][c] = [1.0, 1.0 - t2, 0.0]
+
+    arr = (img * 255).astype(np.uint8)
+    big = np.repeat(np.repeat(arr, cell_px, axis=0), cell_px, axis=1)
+    return Image.fromarray(big)
 
 
 def _make_box_mesh(positions, z_bottom=0.0, z_top=1.0, cell_frac=1.0):
@@ -343,8 +412,8 @@ def build_3d_map_figure(grid, fire_time, path, start, exits, current_time,
                 buckets['wall'].append(pos)
             elif char_pos is not None and pos == tuple(char_pos):
                 pass  # Scatter3d로 별도 처리
-            elif fire_time[r][c] <= current_time:
-                buckets['fire'].append(pos)
+            elif fire_time[r][c] != -1 and fire_time[r][c] <= current_time:
+                buckets['fire'].append(pos)   # -1=미도달 제외
             elif (smoke_time is not None
                   and smoke_time[r][c] != -1
                   and smoke_time[r][c] <= current_time):
@@ -465,7 +534,10 @@ def build_3d_map_figure(grid, fire_time, path, start, exits, current_time,
 def build_3d_building_figure(floor_grids, sim_floor,
                               fire_time, smoke_time, current_time,
                               char_pos, trail, plan_path, start, exits,
-                              fire_preview=None):
+                              fire_preview=None,
+                              char_floor=None,
+                              floor_trails=None,
+                              multi_floor_path=None):
     """
     3개 층을 Z축으로 쌓아 한 화면에 렌더링하는 건축 스타일 3D 빌딩.
     sim_floor 층에만 화재·연기·대피자 시뮬레이션 결과를 표시한다.
@@ -476,6 +548,7 @@ def build_3d_building_figure(floor_grids, sim_floor,
     trail_set   = set(map(tuple, trail))        if trail        else set()
     preview_set = set(map(tuple, fire_preview)) if fire_preview else set()
     exit_set    = {tuple(e) for e in exits}
+    act_char_floor = char_floor if char_floor is not None else sim_floor
 
     rows_g = max(len(g)    for g in floor_grids.values())
     cols_g = max(len(g[0]) for g in floor_grids.values())
@@ -514,7 +587,8 @@ def build_3d_building_figure(floor_grids, sim_floor,
                     bkt['prev'].append(pos)
                 elif is_sim and pos in path_set:
                     bkt['path'].append(pos)
-                elif is_sim and pos in trail_set:
+                elif (floor_trails and pos in {tuple(p) for p in floor_trails.get(floor_num, [])}) \
+                        or (not floor_trails and is_sim and pos in trail_set):
                     bkt['trail'].append(pos)
                 elif pos in exit_set or cell == 'X':
                     bkt['exit'].append(pos)
@@ -580,8 +654,8 @@ def build_3d_building_figure(floor_grids, sim_floor,
                 name='경로 선', showlegend=False,
             ))
 
-        # 대피자 마커 — 벽 안 중간 높이 + 밝은 핑크 구체 + 이모지 텍스트
-        if is_sim and char_pos is not None:
+        # 대피자 마커 — 현재 층(act_char_floor)에만 표시
+        if floor_num == act_char_floor and char_pos is not None:
             cr, cc = char_pos
             z_person = z0 + WALL_H * 0.55   # 벽 높이 55% → 반투명 벽 안에서 잘 보임
             # 배경 구체 — 이모지가 렌더 안 돼도 항상 보임
@@ -610,6 +684,46 @@ def build_3d_building_figure(floor_grids, sim_floor,
             textfont=dict(size=16, color='#333333'),
             showlegend=False,
         ))
+
+    # ── 다중 층 전체 경로 미리보기 ─────────────────────────────────────────────
+    # multi_floor_path = [(floor_num, r, c), ...]
+    # 각 층 내 선분 + 계단 전환 수직 구간을 금색/주황 라인으로 표시
+    if multi_floor_path and len(multi_floor_path) >= 2:
+        # 층 내부 선분
+        seg_start = 0
+        for i in range(1, len(multi_floor_path) + 1):
+            end_of_seg = (i == len(multi_floor_path)
+                          or multi_floor_path[i][0] != multi_floor_path[i - 1][0])
+            if end_of_seg and i > seg_start:
+                seg = multi_floor_path[seg_start:i]
+                fnum = seg[0][0]
+                z0s  = FLOOR_BASES.get(fnum, 0)
+                fig.add_trace(go.Scatter3d(
+                    x=[p[2] + 0.5 for p in seg],
+                    y=[p[1] + 0.5 for p in seg],
+                    z=[z0s + 0.55] * len(seg),
+                    mode='lines',
+                    line=dict(color='#ffe066', width=6),
+                    name='전체 대피 경로', showlegend=(seg_start == 0),
+                    legendgroup='multi_path',
+                ))
+                seg_start = i - 1  # 다음 세그먼트는 전환점부터
+
+        # 계단 전환 수직 구간
+        for i in range(1, len(multi_floor_path)):
+            prev_n = multi_floor_path[i - 1]
+            curr_n = multi_floor_path[i]
+            if prev_n[0] != curr_n[0]:
+                z_top_f = FLOOR_BASES.get(prev_n[0], 0) + 0.55
+                z_bot_f = FLOOR_BASES.get(curr_n[0], 0) + 0.55
+                fig.add_trace(go.Scatter3d(
+                    x=[prev_n[2] + 0.5, curr_n[2] + 0.5],
+                    y=[prev_n[1] + 0.5, curr_n[1] + 0.5],
+                    z=[z_top_f, z_bot_f],
+                    mode='lines',
+                    line=dict(color='#ff9900', width=8, dash='dash'),
+                    name='계단 하강', showlegend=False,
+                ))
 
     total_z = FLOOR_BASES[5] + STAIR_H + 0.1
     fig.update_layout(
@@ -648,6 +762,9 @@ def simulate_evacuees(grid_base, fire_time, exits, current_time, n=10):
     랜덤 시작점 n명을 생성해 각자 최단 경로를 탐색하고
     evacuation 모듈로 성공/탈출시간을 기록한다.
     반환: evacuees dict, 성공 탈출시간 정렬 리스트
+
+    자료구조: 해시맵(dict) — 대피자 정보
+    알고리즘: A*(경로 탐색), 퀵 정렬(탈출 시간 정렬)
     """
     candidates = [
         (r, c)
@@ -677,29 +794,49 @@ def simulate_evacuees(grid_base, fire_time, exits, current_time, n=10):
 
 def advance_simulation(grid_base, fire_time, exits):
     """
-    (b) 실시간 재경로 — 매 스텝마다 '대피자 현재 위치 + 현재 화재 상황' 기준으로
-    A*를 다시 돌려 한 칸 이동시키고 시각을 1 진행한다. session_state를 직접 갱신.
+    실시간 재경로 + 다중 층 지원.
+    매 스텝마다 현재 위치·화재 기준으로 A*를 다시 돌려 한 칸 이동.
+    계단(T) 도달 시 아래 층으로 자동 전환.
+
+    자료구조: 딕셔너리(session_state), 집합(set) — 출구/계단 빠른 조회
+    알고리즘: A*(find_best_exit) — 매 스텝 재경로 탐색
     """
     import streamlit as st
-    t   = st.session_state["sim_time"]
-    pos = tuple(st.session_state["char_pos"])
-    exit_set = {tuple(e) for e in exits}
 
-    # 이미 출구 도착 → 탈출 성공
+    t              = st.session_state["sim_time"]
+    pos            = tuple(st.session_state["char_pos"])
+    selected_floor = st.session_state.get("selected_floor", 5)
+    char_floor     = st.session_state.get("char_floor") or selected_floor
+    exit_set       = {tuple(e) for e in exits}
+    stair_set      = {tuple(s) for s in STAIR_POSITIONS}
+
+    # ── 현재 층 그리드 / 화재 시간 결정 ──
+    floor_grids_all = load_all_floor_grids()
+    cur_grid = floor_grids_all.get(char_floor, grid_base)
+    rows, cols = len(cur_grid), len(cur_grid[0])
+    if char_floor == selected_floor:
+        cur_fire = fire_time
+    else:
+        cur_fire = [[float('inf')] * cols for _ in range(rows)]
+
+    # 출구 도착 → 탈출 성공
     if pos in exit_set:
         st.session_state["char_state"] = "escaped"
         st.session_state["playing"] = False
         return
 
-    # 현재 위치가 화재에 휩싸임 → 탈출 실패
-    if fire_time[pos[0]][pos[1]] <= t:
+    # 화재에 휩싸임 (발화 층에서만 체크)
+    if char_floor == selected_floor and fire_time[pos[0]][pos[1]] <= t:
         st.session_state["char_state"] = "trapped"
         st.session_state["playing"] = False
         return
 
-    # ── 1) 안전 경로(도착 시점까지 화재 안전) 우선 탐색 ──
+    # 탐색 대상: 실제 비상구 + 계단(3층 위 층에서만)
+    extended_exits = list(exits) + list(stair_set) if char_floor > 3 else list(exits)
+
+    # ── 1) 안전 경로 탐색 ──
     path, dist, best_exit, visited = find_best_exit(
-        grid_base, fire_time, pos, exits, t
+        cur_grid, cur_fire, pos, extended_exits, t
     )
     if path and len(path) >= 2:
         st.session_state["plan_path"] = path
@@ -709,45 +846,56 @@ def advance_simulation(grid_base, fire_time, exits):
         st.session_state["risky"] = False
         nxt = tuple(path[1])
 
-        # 연기 지역에서는 1턴만 이동 지연
-        smoke_time = st.session_state.get("smoke_time")
-        smoke_waiting = st.session_state.get("smoke_waiting", False)
-
-        if smoke_time is not None and smoke_time[pos[0]][pos[1]] != -1 and smoke_time[pos[0]][pos[1]] <= t:
-            if not smoke_waiting:
-                st.session_state["smoke_slow_count"] += 1
-                st.session_state["smoke_waiting"] = True
-                st.session_state["sim_time"] = t + 1
-                st.session_state["risky"] = True
-                return
-            else:
-                st.session_state["smoke_waiting"] = False
-                st.session_state["risky"] = False
+        # 연기 지연 (발화 층에서만)
+        if char_floor == selected_floor:
+            smoke_time    = st.session_state.get("smoke_time")
+            smoke_waiting = st.session_state.get("smoke_waiting", False)
+            if (smoke_time is not None
+                    and smoke_time[pos[0]][pos[1]] != -1
+                    and smoke_time[pos[0]][pos[1]] <= t):
+                if not smoke_waiting:
+                    st.session_state["smoke_slow_count"] += 1
+                    st.session_state["smoke_waiting"] = True
+                    st.session_state["sim_time"] = t + 1
+                    st.session_state["risky"] = True
+                    return
+                else:
+                    st.session_state["smoke_waiting"] = False
+                    st.session_state["risky"] = False
 
         st.session_state["char_pos"] = nxt
         st.session_state["trail"].append(nxt)
         st.session_state["sim_time"] = t + 1
+
+        # ── 계단 도달 → 아래 층 전환 ──
+        if nxt in stair_set and char_floor > 3:
+            new_floor = char_floor - 1
+            st.session_state["char_floor"] = new_floor
+            floor_trails = st.session_state.get("floor_trails", {})
+            floor_trails[char_floor] = list(st.session_state["trail"])
+            floor_trails.setdefault(new_floor, [nxt])
+            st.session_state["floor_trails"] = floor_trails
+            st.session_state["trail"] = floor_trails[new_floor]
+
         if nxt in exit_set:
             st.session_state["char_state"] = "escaped"
             st.session_state["playing"] = False
         return
 
-    # 이미 출구에 서 있던 경우(len==1) → 성공
     if path and tuple(path[-1]) in exit_set:
         st.session_state["char_state"] = "escaped"
         st.session_state["playing"] = False
         return
 
-    # ── 2) 안전 경로 없음 → best-effort: 불 안 붙은 칸으로 출구 방향 한 칸 전진 ──
-    #     실제로 둘러싸이거나 불에 닿을 때까지 계속 움직여 '막히는 과정'을 보여준다.
+    # ── 2) 안전 경로 없음 → best-effort ──
     st.session_state["plan_path"] = []
     st.session_state["best_exit"] = best_exit
     st.session_state["visited_n"] = 0
     st.session_state["risky"] = True
 
     trail = st.session_state["trail"]
-    prev = tuple(trail[-2]) if len(trail) >= 2 else None
-    nxt = _best_effort_next(grid_base, fire_time, pos, exits, t, prev=prev)
+    prev  = tuple(trail[-2]) if len(trail) >= 2 else None
+    nxt   = _best_effort_next(cur_grid, cur_fire, pos, extended_exits, t, prev=prev)
     if nxt is None:
         st.session_state["char_state"] = "trapped"
         st.session_state["playing"] = False
@@ -756,6 +904,16 @@ def advance_simulation(grid_base, fire_time, exits):
     st.session_state["char_pos"] = nxt
     trail.append(nxt)
     st.session_state["sim_time"] = t + 1
+
+    if nxt in stair_set and char_floor > 3:
+        new_floor = char_floor - 1
+        st.session_state["char_floor"] = new_floor
+        floor_trails = st.session_state.get("floor_trails", {})
+        floor_trails[char_floor] = list(trail)
+        floor_trails.setdefault(new_floor, [nxt])
+        st.session_state["floor_trails"] = floor_trails
+        st.session_state["trail"] = floor_trails[new_floor]
+
     if nxt in exit_set:
         st.session_state["char_state"] = "escaped"
         st.session_state["playing"] = False
@@ -780,7 +938,7 @@ def _best_effort_next(grid, fire_time, pos, exits, t, prev=None):
             continue
         if grid[nr][nc] == '#':
             continue
-        if fire_time[nr][nc] <= t:      # 현재 불타는 칸 제외
+        if fire_time[nr][nc] != -1 and fire_time[nr][nc] <= t:   # -1=미도달(안전)
             continue
         candidates.append((nr, nc))
 
@@ -803,7 +961,7 @@ def _init_sim_state(st):
         "click_target": "내 위치",  # 직접 지정 모드에서 클릭이 무엇을 찍을지
         "manual_fires": [],     # 수동 화재 발화점 목록
         "playing": False,       # 자동 재생 여부
-        "speed": 0.5,           # 한 스텝당 대기(초)
+        "speed": 0.25,          # 한 스텝당 대기(초)
         "sim_time": 0,          # 경과 시각 t
         "char_pos": None,       # 대피자 현재 위치
         "char_state": "moving",  # moving | escaped | trapped
@@ -823,6 +981,11 @@ def _init_sim_state(st):
         "last_click": None,     # 마지막으로 '처리한' 지도 클릭값 (중복 처리 방지)
         "fire_speed": 0.4,      # 화재 확산 속도 (1.0=현재, 0.4=느림)
         "3d_initialized": False,  # 3D 카메라 최초 설정 여부
+        # ── 다중 층 대피 ──
+        "char_floor": None,       # 대피자 현재 층 (None=미시작)
+        "floor_trails": {},       # {floor_num: [(r,c),...]} 층별 이동 자취
+        "multi_floor_path": [],   # [(floor_num,r,c),...] 전체 경로 미리보기
+        "evac_paths": [],         # 히트맵용 대피자 경로 목록
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -830,7 +993,11 @@ def _init_sim_state(st):
 
 
 def _start_simulation(st, grid_base, exits):
-    """화재를 확정하고 재생 단계로 진입 — 통계도 이때 1회만 계산해 고정."""
+    """
+    화재를 확정하고 재생 단계로 진입 — 통계도 이때 1회만 계산해 고정.
+    알고리즘: BFS(화재·연기 확산), 다중 층 A*(전체 경로 미리보기), 퀵 정렬(통계)
+    자료구조: 2D 배열(fire_time, smoke_time), 딕셔너리(session_state)
+    """
     if st.session_state["fire_mode"] == "랜덤":
         positions = get_random_fire_positions(
             grid_base, count=st.session_state.get("fire_count", 2)
@@ -877,10 +1044,28 @@ def _start_simulation(st, grid_base, exits):
     st.session_state["plan_path"] = []
     st.session_state["playing"] = True
 
+    # ── 다중 층 초기화 ──
+    sim_floor = st.session_state["selected_floor"]
+    st.session_state["char_floor"] = sim_floor
+    st.session_state["floor_trails"] = {sim_floor: [st.session_state["start"]]}
+
+    # 다중 층 A* 경로 미리보기 (t=0 기준, 화재 회피 포함)
+    floor_grids_all = load_all_floor_grids()
+    fire_times_dict  = {sim_floor: fire_time}
+    multi_path = find_multi_floor_path(
+        floor_grids_all, fire_times_dict, STAIR_POSITIONS,
+        sim_floor, st.session_state["start"], current_time=0,
+    )
+    st.session_state["multi_floor_path"] = multi_path or []
+
     # 대피 통계는 시작 시 한 번만 계산해 고정(매 프레임 재추첨 방지)
     _evac, sorted_times = simulate_evacuees(grid_base, fire_time, exits, 0, n=10)
     st.session_state["evac_total"] = 10
     st.session_state["evac_sorted"] = sorted_times
+    # 히트맵용 경로 저장
+    st.session_state["evac_paths"] = [
+        d.get("path", []) for d in _evac.values() if d.get("path")
+    ]
 
 
 def _reset_simulation(st):
@@ -896,6 +1081,10 @@ def _reset_simulation(st):
     st.session_state["smoke_time"] = None
     st.session_state["smoke_waiting"] = False
     st.session_state["smoke_slow_count"] = 0
+    st.session_state["char_floor"] = None
+    st.session_state["floor_trails"] = {}
+    st.session_state["multi_floor_path"] = []
+    st.session_state["evac_paths"] = []
 
 
 def render_streamlit_ui():
@@ -991,11 +1180,6 @@ def render_streamlit_ui():
                 _reset_simulation(st)
                 st.rerun()
 
-    # ── 현재 화재/경로 상태 준비 ──
-    # ── 메인 뷰: @st.fragment 으로 전체 래핑 ─────────────────────────────────
-    # simulation tick 을 scope="fragment" 로 처리 → Plotly 컴포넌트 절대 재마운트 없음
-    # → uirevision 이 카메라를 그대로 보존
-    @st.fragment
     def _main_view():
         import time as _time
         from streamlit_image_coordinates import streamlit_image_coordinates as _sic
@@ -1027,13 +1211,21 @@ def render_streamlit_ui():
         _grid = make_grid_with_start(_grid_base, _start)
 
         # 3D 차트
-        st.subheader(f"🏢 3D 빌딩 뷰  ({_floor}층 시뮬레이션 중, t = {_t})")
+        _char_floor       = st.session_state.get("char_floor") or _floor
+        _floor_trails     = st.session_state.get("floor_trails", {})
+        _multi_floor_path = st.session_state.get("multi_floor_path", [])
+        _floor_label = (f"{_char_floor}층 이동 중" if _char_floor != _floor
+                        else f"{_floor}층 시뮬레이션 중")
+        st.subheader(f"🏢 3D 빌딩 뷰  ({_floor_label}, t = {_t})")
         _fgrids = load_all_floor_grids()
         _fig = build_3d_building_figure(
             _fgrids, _floor,
             _fire_time, _smoke_time, _t,
             _char_pos, _trail, _plan_path, _start, _exits,
             fire_preview=_fire_preview,
+            char_floor=_char_floor,
+            floor_trails=_floor_trails,
+            multi_floor_path=_multi_floor_path,
         )
         if not st.session_state.get("3d_initialized"):
             _fig.update_layout(scene_camera=dict(
@@ -1049,7 +1241,7 @@ def render_streamlit_ui():
         with col_map:
             with st.expander(
                 f"🗺️ 2D 지도  (클릭으로 위치·화재 설정) — {_floor}층",
-                expanded=(_phase == "setup"),
+                expanded=True,
             ):
                 pil = build_map_image(
                     _grid, _fire_time_2d, _plan_path, _start, _exits, _t, _CELL_PX,
@@ -1078,13 +1270,13 @@ def render_streamlit_ui():
                                     fires.remove(clicked)
                                 else:
                                     fires.append(clicked)
-                                st.rerun(scope="fragment")
+                                st.rerun()
                             else:
                                 st.warning(f"({cr + 1}, {cc + 1})은(는) 화재를 둘 수 없는 칸입니다.")
                         elif clicked != _start:
                             if _grid_base[cr][cc] in PASSABLE_START:
                                 st.session_state["start"] = clicked
-                                st.rerun(scope="fragment")
+                                st.rerun()
                             else:
                                 st.warning(f"({cr + 1}, {cc + 1})은(는) 이동할 수 없는 칸입니다. "
                                            "통로/강의실을 클릭하세요.")
@@ -1104,8 +1296,17 @@ def render_streamlit_ui():
                 return
 
             st.subheader("🧭 대피 진행")
-            _state = st.session_state.get("char_state", "moving")
-            _t_now = st.session_state.get("sim_time", 0)
+            _state     = st.session_state.get("char_state", "moving")
+            _t_now     = st.session_state.get("sim_time", 0)
+            _cf        = st.session_state.get("char_floor") or _floor
+            _floors_done = sorted(
+                [f for f in st.session_state.get("floor_trails", {}) if f != _cf],
+                reverse=True,
+            )
+            _floor_info = f"현재 {_cf}층"
+            if _floors_done:
+                _floor_info += f"  (통과: {' → '.join(str(f) for f in _floors_done)}층)"
+            st.caption(f"🏢 {_floor_info}")
             if _state == "escaped":
                 st.success(f"탈출 성공 ✅ — {_t_now}초 만에 비상구 도착")
             elif _state == "trapped":
@@ -1122,7 +1323,7 @@ def render_streamlit_ui():
             m2.metric("목표 출구", f"{best_exit}" if best_exit else "—")
             if best_exit:
                 fa = st.session_state["fire_time"][best_exit[0]][best_exit[1]]
-                m3.metric("출구 화재 도달", "안전" if fa == INF else f"t={int(fa)}")
+                m3.metric("출구 화재 도달", "안전" if fa in (-1, INF) else f"t={int(fa)}")
             else:
                 m3.metric("출구 화재 도달", "—")
             st.caption(f"이번 스텝 A* 탐색 노드: {st.session_state.get('visited_n', 0)}개  ·  "
@@ -1183,13 +1384,29 @@ def render_streamlit_ui():
             c2.metric("평균 대기 시간", f"{cong_stats['average_waiting_time']:.1f}초")
             c3.metric("대기 발생 인원", f"{cong_stats['total_congested_people']}명")
 
+            # ── 위험도 히트맵 ──────────────────────────────────────────────────
+            st.divider()
+            with st.expander("🌡️ 위험도 히트맵", expanded=False):
+                st.caption(
+                    "🔴 빨강 = 화재 빠름(위험)  🟢 초록 = 안전  "
+                    "🔵 파랑 = 비상구  🟠 주황 = 계단  "
+                    "● 경로 병목도 반영"
+                )
+                _hm_img = build_heatmap_image(
+                    _grid_base,
+                    _fire_time_2d,
+                    evacuee_paths=st.session_state.get("evac_paths") or None,
+                    cell_px=8,
+                )
+                st.image(_hm_img, use_container_width=True)
+
         # ── 자동 재생 — fragment scope 만 rerun → Plotly 절대 재마운트 없음 ──
         if (st.session_state.get("playing")
                 and st.session_state.get("char_state") == "moving"
                 and st.session_state.get("fire_time") is not None):
             _time.sleep(st.session_state.get("speed", 0.5))
             advance_simulation(_grid_base, st.session_state["fire_time"], _exits)
-            st.rerun(scope="fragment")
+            st.rerun()
 
     _main_view()
 
