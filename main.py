@@ -1210,31 +1210,6 @@ def render_streamlit_ui():
                          else [[INF] * _cols for _ in range(_rows)])
         _grid = make_grid_with_start(_grid_base, _start)
 
-        # 3D 차트
-        _char_floor       = st.session_state.get("char_floor") or _floor
-        _floor_trails     = st.session_state.get("floor_trails", {})
-        _multi_floor_path = st.session_state.get("multi_floor_path", [])
-        _floor_label = (f"{_char_floor}층 이동 중" if _char_floor != _floor
-                        else f"{_floor}층 시뮬레이션 중")
-        st.subheader(f"🏢 3D 빌딩 뷰  ({_floor_label}, t = {_t})")
-        _fgrids = load_all_floor_grids()
-        _fig = build_3d_building_figure(
-            _fgrids, _floor,
-            _fire_time, _smoke_time, _t,
-            _char_pos, _trail, _plan_path, _start, _exits,
-            fire_preview=_fire_preview,
-            char_floor=_char_floor,
-            floor_trails=_floor_trails,
-            multi_floor_path=_multi_floor_path,
-        )
-        if not st.session_state.get("3d_initialized"):
-            _fig.update_layout(scene_camera=dict(
-                eye=dict(x=1.6, y=-2.2, z=0.9),
-                up=dict(x=0, y=0, z=1),
-            ))
-            st.session_state["3d_initialized"] = True
-        st.plotly_chart(_fig, use_container_width=True, key="plotly_3d_building")
-
         # 2D 지도 + 통계
         col_map, col_info = st.columns([3, 2])
 
@@ -1399,6 +1374,31 @@ def render_streamlit_ui():
                     cell_px=8,
                 )
                 st.image(_hm_img, use_container_width=True)
+
+        # 3D 빌딩 뷰 (시뮬레이션 중 스크롤 시 확인)
+        _char_floor       = st.session_state.get("char_floor") or _floor
+        _floor_trails     = st.session_state.get("floor_trails", {})
+        _multi_floor_path = st.session_state.get("multi_floor_path", [])
+        _floor_label = (f"{_char_floor}층 이동 중" if _char_floor != _floor
+                        else f"{_floor}층 시뮬레이션 중")
+        st.subheader(f"🏢 3D 빌딩 뷰  ({_floor_label}, t = {_t})")
+        _fgrids = load_all_floor_grids()
+        _fig = build_3d_building_figure(
+            _fgrids, _floor,
+            _fire_time, _smoke_time, _t,
+            _char_pos, _trail, _plan_path, _start, _exits,
+            fire_preview=_fire_preview,
+            char_floor=_char_floor,
+            floor_trails=_floor_trails,
+            multi_floor_path=_multi_floor_path,
+        )
+        if not st.session_state.get("3d_initialized"):
+            _fig.update_layout(scene_camera=dict(
+                eye=dict(x=1.6, y=-2.2, z=0.9),
+                up=dict(x=0, y=0, z=1),
+            ))
+            st.session_state["3d_initialized"] = True
+        st.plotly_chart(_fig, use_container_width=True, key="plotly_3d_building")
 
         # ── 자동 재생 — fragment scope 만 rerun → Plotly 절대 재마운트 없음 ──
         if (st.session_state.get("playing")
